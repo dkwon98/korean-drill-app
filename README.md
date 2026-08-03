@@ -1,1 +1,0 @@
-# korean-drill-app
