@@ -6,8 +6,15 @@
 'use strict';
 
 const SRS = {
-  LEARNING_STEPS_MIN: [10, 30, 120],
+  // Sized to the Mac's 3-hour firing grid: first rep next session, second
+  // rep next day. Mirrors drill.py — change both or the golden test fails.
+  LEARNING_STEPS_MIN: [180, 1440],
   GRADUATED_MIN: 24 * 60,
+
+  // Lesson content by tag, set by the app after it loads lessons.json.
+  // Never-seen cards whose lesson is here but not studied stay out of every
+  // queue. Empty → no gating (decks without lessons behave as before).
+  LESSONS: {},
   EASE_START: 2.5,
   EASE_FLOOR: 1.3,
   EASE_PENALTY: 0.2,
@@ -79,6 +86,27 @@ const SRS = {
 
   baseOf(id) { return id.slice(0, id.lastIndexOf(':')); },
 
+  // 'lesson:<tag>' pseudo-entries in state mark lessons studied; they carry
+  // card-shaped fields so mergeState needs no special case (studied wins).
+  studiedLessons(state) {
+    const out = new Set();
+    for (const k of Object.keys(state)) {
+      if (k.startsWith('lesson:') && (state[k].reps || 0) > 0) {
+        out.add(k.slice('lesson:'.length));
+      }
+    }
+    return out;
+  },
+
+  lockedLessons(state) {
+    const studied = SRS.studiedLessons(state);
+    return new Set(Object.keys(SRS.LESSONS).filter(t => !studied.has(t)));
+  },
+
+  gated(card, entry, locked) {
+    return entry.reps === 0 && !!card.lesson && locked.has(card.lesson);
+  },
+
   // Cards tagged deliver:"table" are a paradigm the grid and the matching
   // round teach as a system. They keep their schedule and their history --
   // they are just never handed out as isolated multiple-choice.
@@ -92,9 +120,11 @@ const SRS = {
 
   dueCards(cards, state, now) {
     const nowIso = SRS.iso(now);
+    const locked = SRS.lockedLessons(state);
     const out = [];
     for (const c of SRS.drillable(cards)) {
       const e = SRS.entryFor(state, c.id);
+      if (SRS.gated(c, e, locked)) continue;
       if (e.due <= nowIso) out.push([c, e]);
     }
     out.sort((x, y) => {
@@ -219,6 +249,9 @@ const SRS = {
     } else {
       pool = cards.slice();
     }
+
+    const lockedPool = SRS.lockedLessons(state);
+    pool = pool.filter(c => !SRS.gated(c, SRS.entryFor(state, c.id), lockedPool));
 
     if (mode !== 'hardest') {
       const dueIds = new Set(SRS.dueCards(cards, state, now).map(p => p[0].id));
