@@ -542,10 +542,54 @@ function start(mode) {
   if (!q.length && crankEnd && mode === 'due') {
     q = SRS.selectQueue(cards, state, 'all', new Date());
   }
-  if (!q.length) { status('Nothing to study for that.'); return; }
+  if (!q.length) { explainEmpty(mode); return; }
+  status('');
   queue = q.map(([card]) => card);
   idx = 0; right = 0; wrong = 0; rehearsed = {};
   show('drill'); render();
+}
+
+/* An empty mode is never a dead button: say why it is empty, and when a
+   lesson is what unblocks it, open that lesson — the same teach-on-empty
+   the Mac's scheduled sessions do. */
+function explainEmpty(mode) {
+  const nxt = nextUnstudiedLesson();
+  if (mode === 'lesson') {
+    const tags = [...new Set(cards.map(c => c.lesson).filter(Boolean))].sort();
+    const latest = tags[tags.length - 1];
+    if (latest && !lessonStudied(latest)) {
+      openLesson(latest, 'the latest batch starts with its lesson');
+      return;
+    }
+  }
+  if ((mode === 'due' || mode === 'new') && nxt) {
+    openLesson(nxt.tag, mode === 'due'
+        ? 'nothing due — next lesson instead'
+        : 'new cards unlock here');
+    return;
+  }
+  goHome();
+  status(mode === 'hardest'
+      ? 'No trouble cards — nothing keeps getting missed.'
+      : mode === 'due'
+        ? 'All caught up — ' + nextDueHuman() + '.'
+        : 'Nothing to study for that.');
+}
+
+function nextDueHuman() {
+  const nowIso = SRS.iso(new Date());
+  const locked = SRS.lockedLessons(state);
+  let best = null;
+  for (const c of SRS.drillable(cards)) {
+    const e = SRS.entryFor(state, c.id);
+    if (SRS.gated(c, e, locked)) continue;
+    if (e.due > nowIso && (!best || e.due < best)) best = e.due;
+  }
+  if (!best) return 'nothing scheduled yet';
+  const mins = (new Date(best) - new Date()) / 60000;
+  if (mins < 90) return 'next card in ' + Math.max(1, Math.round(mins)) + ' min';
+  if (mins < 60 * 24) return 'next card in ' + Math.round(mins / 60) + 'h';
+  return 'next card in ' + Math.round(mins / 1440) + 'd';
 }
 function startCrank() { crankEnd = Date.now() + 30 * 60000; start('due'); }
 
@@ -1145,10 +1189,11 @@ function openLessons() {
   show('lessons');
 }
 
-function openLesson(tag) {
+function openLesson(tag, note) {
   const l = LESSONS.find(x => x.tag === tag);
-  if (!l) return;
-  $('l-kicker').textContent = 'LESSON  ·  ~' + (l.minutes || 3) + ' MIN READ';
+  if (!l) { goHome(); return; }
+  $('l-kicker').textContent = (note ? note : 'lesson  ·  ~' +
+      (l.minutes || 3) + ' min read').toUpperCase();
   const box = $('l-scroll');
   box.innerHTML = '';
   const el = (cls, txt, parent) => {
