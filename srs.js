@@ -225,10 +225,13 @@ const SRS = {
     return out;
   },
 
-  selectQueue(cards, state, mode, now) {
+  selectQueue(cards, state, mode, now, newCap) {
     now = now || new Date();
     cards = SRS.drillable(cards);
-    if (mode === 'due') return SRS.orderQueue(SRS.dueCards(cards, state, now));
+    if (mode === 'due') {
+      return SRS.orderQueue(SRS.dueCards(cards, state, now),
+                            undefined, undefined, newCap);
+    }
 
     let pool;
     if (mode === 'vocab' || mode === 'sentences') {
@@ -265,7 +268,8 @@ const SRS = {
     }
     return SRS.orderQueue(pool.map(c => [c, SRS.entryFor(state, c.id)]),
                           undefined, undefined,
-                          mode === 'new' ? SRS.SESSION_CAP : undefined);
+                          newCap !== undefined ? newCap
+                              : (mode === 'new' ? SRS.SESSION_CAP : undefined));
   },
 };
 

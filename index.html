@@ -219,6 +219,7 @@
   <h1 id="done-line"></h1>
   <div class="sub" id="done-sub"></div>
   <button class="primary" onclick="start('due')">Again</button>
+  <button id="done-next" style="display:none"></button>
   <button onclick="goHome()">Home</button>
 </div>
 
@@ -235,6 +236,7 @@
   <div class="lscroll" id="l-scroll"></div>
   <div class="lbar">
     <button class="primary" id="l-action"></button>
+    <button id="l-skip" style="display:none"></button>
     <button onclick="openLessons()">Back</button>
   </div>
 </div>
@@ -537,8 +539,8 @@ function renderHome() {
 function goHome() { show('home'); renderHome(); flushReviews(); }
 
 /* -------------------------------- drill --------------------------------- */
-function start(mode) {
-  let q = SRS.selectQueue(cards, state, mode, new Date());
+function start(mode, newCap) {
+  let q = SRS.selectQueue(cards, state, mode, new Date(), newCap);
   if (!q.length && crankEnd && mode === 'due') {
     q = SRS.selectQueue(cards, state, 'all', new Date());
   }
@@ -681,6 +683,16 @@ function sessionDone(matchSecs, ladderMsg) {
   if (matchSecs != null) bits.push('matched in ' + matchSecs + 's');
   bits.push(tail);
   $('done-sub').textContent = bits.join('   ·   ');
+  // In the mood to keep going? The next unread lesson is one tap away.
+  const nb = $('done-next');
+  const nxt = nextUnstudiedLesson();
+  if (nxt) {
+    nb.style.display = '';
+    nb.textContent = 'Next lesson: ' + nxt.title;
+    nb.onclick = () => openLesson(nxt.tag);
+  } else {
+    nb.style.display = 'none';
+  }
   show('done');
 }
 
@@ -1165,6 +1177,36 @@ function markLessonStudied(tag) {
   pushState();
 }
 
+/* Test-out: you already know a batch, so don't drill it — pre-graduate its
+   never-seen cards to staggered refresher intervals (the same treatment the
+   foundation vocab got) and mark the lesson read. Deterministic stagger by
+   position, so the two devices agree. */
+function testOutLesson(tag) {
+  const batch = cards.filter(c => c.lesson === tag)
+                     .sort((a, b) => a.id < b.id ? -1 : 1);
+  const now = new Date();
+  let n = 0;
+  batch.forEach((c, i) => {
+    if (SRS.entryFor(state, c.id).reps > 0) return;
+    const days = 14 + (i * 7919) % 22;
+    state[c.id] = {
+      due: SRS.iso(new Date(now.getTime() + days * 86400000)),
+      step: 99, interval_min: days * 1440,
+      ease: SRS.EASE_START, reps: 3, lapses: 0,
+    };
+    n++;
+  });
+  localStorage.setItem('cachedState', JSON.stringify(state));
+  markLessonStudied(tag);
+  pushState();
+  return n;
+}
+
+function drillableNewCount(tag) {
+  return cards.filter(c => c.lesson === tag && c.deliver !== 'table' &&
+                           SRS.entryFor(state, c.id).reps === 0).length;
+}
+
 function openLessons() {
   const box = $('lsn-list');
   box.innerHTML = '';
@@ -1223,15 +1265,27 @@ function openLesson(tag, note) {
     }
   }
   const act = $('l-action');
+  const skip = $('l-skip');
   const wire = () => {
     if (!lessonStudied(tag)) {
       const n = lessonGatedCount(tag);
       act.textContent = n ? 'Mark as read — unlock ' + n + ' cards'
                           : 'Mark as read';
       act.onclick = () => { markLessonStudied(tag); wire(); };
+      skip.style.display = n ? '' : 'none';
+      skip.textContent = 'I already know this — skip ahead';
+      skip.onclick = () => {
+        const done = testOutLesson(tag);
+        status('Skipped — ' + done + ' cards parked as far-out refreshers.');
+        wire();
+      };
     } else {
       act.textContent = 'Start session';
-      act.onclick = () => start('due');
+      // Serve the whole batch in one sitting when it is bigger than the
+      // scheduled drip — a lesson you just read deserves its full set.
+      const cap = Math.max(SRS.NEW_PER_SESSION, drillableNewCount(tag));
+      act.onclick = () => start('due', cap);
+      skip.style.display = 'none';
     }
   };
   wire();
