@@ -125,6 +125,15 @@
                 line-height:1.4}
   .rline.open .gloss{display:block}
   .rline .note{color:var(--dim);font-size:12px;margin-top:2px}
+  .rplay{float:right;color:var(--blue);font-size:18px;padding:0 2px 6px 10px}
+  #prompt.listen{font-size:56px;cursor:pointer}
+  .speak-box{display:flex;flex-direction:column;gap:10px}
+  .speak-target{background:var(--row);border:1px solid var(--line);
+        border-radius:12px;padding:14px;font-size:20px;text-align:center}
+  .speak-heard{color:var(--muted);font-size:14px;text-align:center;min-height:20px}
+  .speak-verdict{text-align:center;font-weight:600;font-size:15px}
+  .speak-verdict.ok{color:var(--green)}.speak-verdict.bad{color:var(--red)}
+  button.rec{border-color:var(--red);color:var(--red);font-weight:600;font-size:17px}
 </style>
 </head>
 <body>
@@ -136,6 +145,10 @@
      (<b id="s-repo"></b>). Paste a fine-grained personal access token that can
      read and write the contents of that one repo — nothing else.</p>
   <textarea id="tok" placeholder="github_pat_…" autocapitalize="off" autocorrect="off"></textarea>
+  <p>Optional — an <b>ElevenLabs API key</b> turns on speech-scored speaking
+     cards (your voice is sent only to ElevenLabs for transcription; the key
+     stays in this browser):</p>
+  <textarea id="elk" placeholder="sk_… (optional)" autocapitalize="off" autocorrect="off" style="min-height:52px"></textarea>
   <button class="primary" onclick="saveToken()">Save and load deck</button>
   <div class="status err" id="s-err"></div>
 </div>
@@ -168,6 +181,7 @@
   </div>
   <button onclick="openTables()">Tables<small>the two number systems and counters, as a grid</small></button>
   <button id="b-notif" onclick="enablePush()" style="display:none">Enable notifications</button>
+  <button onclick="openSettings()" style="font-size:14px;color:var(--muted)">Settings<small>GitHub token · ElevenLabs key</small></button>
   <div class="status" id="h-status"></div>
 </div>
 
@@ -598,9 +612,24 @@ function startCrank() { crankEnd = Date.now() + 30 * 60000; start('due'); }
 function render() {
   const c = queue[idx];
   locked = false;
-  $('d-kicker').textContent = (c.rehearsal ? 'AGAIN  ·  ' : '') +
-      (c.dir === 'ko2en' ? 'CHOOSE THE MEANING' : 'CHOOSE THE KOREAN');
-  $('prompt').textContent = c.prompt;
+  $('opts').className = 'opts';
+  if (c.deliver === 'speak') { renderSpeak(c); renderFoot(c); return; }
+  let kick = c.dir === 'ko2en' ? 'CHOOSE THE MEANING' : 'CHOOSE THE KOREAN';
+  if (c.cat === 'listening') kick = 'CHOOSE WHAT YOU HEARD';
+  $('d-kicker').textContent = (c.rehearsal ? 'AGAIN  ·  ' : '') + kick;
+  const p = $('prompt');
+  if (c.cat === 'listening') {
+    p.className = 'listen';
+    p.textContent = '🔊';
+    p.onclick = () => playAudioName(c.audio);
+    playAudioName(c.audio).then(okAudio => {
+      if (!okAudio) { p.className = ''; p.textContent = c.transcript || c.prompt; }
+    });
+  } else {
+    p.className = '';
+    p.onclick = null;
+    p.textContent = c.prompt;
+  }
   const opts = c.options.slice();
   for (let i = opts.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -616,7 +645,12 @@ function render() {
     d.onclick = () => pick(d, o, c);
     box.appendChild(d);
   });
+  renderFoot(c);
+}
+
+function renderFoot(c) {
   let foot = (idx + 1) + ' of ' + queue.length;
+  if (c && c.rehearsal) foot += '   ·   once more, from earlier';
   if (crankEnd) {
     foot += '   ·   ' +
         Math.max(0, Math.ceil((crankEnd - Date.now()) / 60000)) + ' min left';
@@ -633,8 +667,11 @@ function pick(el, opt, c) {
     if (t === c.answer) d.classList.add('right');
     else if (d === el) d.classList.add('wrong');
   });
-  $('foot').textContent = ok ? 'Correct'
-      : c.answer + (c.hint ? '  —  ' + c.hint : '');
+  const said = c.cat === 'listening' && c.transcript
+      ? c.transcript + '   ·   ' : '';
+  $('foot').textContent = ok ? 'Correct' + (said ? '  —  ' + c.transcript : '')
+      : said + c.answer + (c.hint ? '  —  ' + c.hint : '');
+  if (c.audio) playAudioName(c.audio);
   if (!c.rehearsal) { if (ok) right++; else wrong++; }
   if (navigator.vibrate) navigator.vibrate(ok ? 10 : [30, 40, 30]);
 
@@ -1143,6 +1180,208 @@ function leaveMatch() {
   openTables();
 }
 
+/* --------------------------------- audio --------------------------------- */
+/* Clips live in the private sync repo under audio/, named by text hash.
+   Fetched once per session via the contents API, cached as blob URLs.
+   Missing clips (gen-audio.py not run yet) degrade to text, loudly once. */
+
+const AUDIO_URLS = new Map();
+let PLAYER = new Audio();
+let audioWarned = false;
+
+async function audioUrl(name) {
+  if (!name) return null;
+  if (AUDIO_URLS.has(name)) return AUDIO_URLS.get(name);
+  try {
+    const r = await gh(fileUrl('audio/' + name));
+    if (!r.ok) { AUDIO_URLS.set(name, null); return null; }
+    const j = await r.json();
+    const bytes = Uint8Array.from(atob(j.content.replace(/\n/g, '')),
+                                  c => c.charCodeAt(0));
+    const url = URL.createObjectURL(new Blob([bytes], { type: 'audio/mpeg' }));
+    AUDIO_URLS.set(name, url);
+    return url;
+  } catch (e) { return null; }
+}
+
+async function playAudioName(name) {
+  const u = await audioUrl(name);
+  if (!u) {
+    if (!audioWarned) {
+      audioWarned = true;
+      status('no audio yet — run gen-audio.py --push on the Mac');
+    }
+    return false;
+  }
+  try { PLAYER.pause(); PLAYER.src = u; await PLAYER.play(); } catch (e) {}
+  return true;
+}
+
+/* --------------------------- speaking (Scribe) ---------------------------- */
+/* Say the Korean out loud; ElevenLabs Scribe transcribes; a jamo-level edit
+   distance proposes the grade and YOU confirm it — STT on learner speech is
+   evidence, not a judge. No key / no mic → reveal-and-self-grade. */
+
+function jamo(str) {
+  const out = [];
+  for (const ch of str) {
+    const c = ch.codePointAt(0);
+    if (c >= 0xAC00 && c <= 0xD7A3) {
+      const i = c - 0xAC00;
+      out.push(0x1100 + Math.floor(i / 588),
+               0x1161 + Math.floor((i % 588) / 28));
+      const t = i % 28;
+      if (t) out.push(0x11A7 + t);
+    } else if (/[ㄱ-ㅎㅏ-ㅣ0-9]/.test(ch)) {
+      out.push(c);
+    }
+  }
+  return out;
+}
+
+function speechSim(a, b) {
+  a = jamo(a); b = jamo(b);
+  const m = a.length, n = b.length;
+  if (!m && !n) return 1;
+  if (!m || !n) return 0;
+  const d = Array.from({ length: m + 1 }, (_, i) => {
+    const row = new Array(n + 1).fill(0); row[0] = i; return row;
+  });
+  for (let j = 0; j <= n; j++) d[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1,
+                         d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+  }
+  return 1 - d[m][n] / Math.max(m, n);
+}
+
+async function transcribe(blob) {
+  const key = localStorage.getItem('elkey');
+  if (!key) return null;
+  const fd = new FormData();
+  fd.append('model_id', localStorage.getItem('elsttmodel') || 'scribe_v1');
+  fd.append('file', blob, 'say.mp4');
+  const r = await fetch('https://api.elevenlabs.io/v1/speech-to-text', {
+    method: 'POST', headers: { 'xi-api-key': key }, body: fd });
+  if (!r.ok) throw new Error('STT HTTP ' + r.status);
+  return (await r.json()).text || '';
+}
+
+let recState = null;   // {rec, chunks, card}
+
+function renderSpeak(c) {
+  $('d-kicker').textContent = 'SAY IT IN KOREAN';
+  $('prompt').className = '';
+  $('prompt').textContent = c.prompt;
+  const box = $('opts');
+  box.innerHTML = '';
+  box.className = 'opts speak-box';
+  const target = document.createElement('div');
+  target.className = 'speak-target';
+  target.textContent = '···';
+  target.dataset.hidden = '1';
+  const heard = document.createElement('div');
+  heard.className = 'speak-heard';
+  const verdict = document.createElement('div');
+  verdict.className = 'speak-verdict';
+  const act = document.createElement('button');
+  const canSTT = !!localStorage.getItem('elkey') &&
+      navigator.mediaDevices && window.MediaRecorder;
+  box.append(target, heard, verdict, act);
+
+  const reveal = () => {
+    target.textContent = c.answer;
+    target.dataset.hidden = '';
+    if (c.audio) playAudioName(c.audio);
+  };
+  const gradeButtons = suggestOk => {
+    act.remove();
+    const pair = document.createElement('div');
+    pair.className = 'pair';
+    const yes = document.createElement('button');
+    yes.textContent = 'Count it right';
+    if (suggestOk) yes.className = 'primary';
+    const no = document.createElement('button');
+    no.textContent = 'Count it wrong';
+    if (!suggestOk) no.className = 'rec';
+    const done = ok => {
+      if (ok) right++; else wrong++;
+      commitLocal(c, ok);
+      setTimeout(next, 800);
+    };
+    yes.onclick = () => done(true);
+    no.onclick = () => done(false);
+    box.appendChild(pair);
+    pair.append(yes, no);
+  };
+
+  if (!canSTT) {
+    act.className = 'primary';
+    act.textContent = 'Reveal — did you say it?';
+    act.onclick = () => { reveal(); gradeButtons(true); };
+  } else {
+    act.className = 'rec';
+    act.textContent = '●  Record';
+    act.onclick = async () => {
+      if (!recState) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          const rec = new MediaRecorder(stream);
+          recState = { rec, chunks: [] };
+          rec.ondataavailable = e => recState.chunks.push(e.data);
+          rec.start();
+          act.textContent = '■  Stop';
+        } catch (e) {
+          status('no mic access — falling back to self-grade', true);
+          act.className = 'primary';
+          act.textContent = 'Reveal — did you say it?';
+          act.onclick = () => { reveal(); gradeButtons(true); };
+        }
+        return;
+      }
+      const { rec, chunks } = recState;
+      rec.onstop = async () => {
+        rec.stream.getTracks().forEach(t => t.stop());
+        recState = null;
+        act.disabled = true;
+        act.textContent = 'Transcribing…';
+        let text = null;
+        try {
+          text = await transcribe(new Blob(chunks,
+              { type: rec.mimeType || 'audio/mp4' }));
+        } catch (e) { /* fall through to self-grade */ }
+        reveal();
+        if (text === null) {
+          verdict.textContent = 'transcription unavailable — grade yourself';
+          gradeButtons(true);
+          return;
+        }
+        heard.textContent = 'heard: ' + (text.trim() || '(nothing)');
+        const sim = speechSim(text, c.answer);
+        const ok = sim >= 0.72;
+        verdict.textContent = ok
+            ? '✓ sounds right (' + Math.round(sim * 100) + '% match)'
+            : '✗ not quite (' + Math.round(sim * 100) + '% match)';
+        verdict.classList.add(ok ? 'ok' : 'bad');
+        gradeButtons(ok);
+      };
+      rec.stop();
+    };
+  }
+}
+
+function openSettings() {
+  $('tok').value = '';
+  $('tok').placeholder = TOKEN ? 'GitHub token saved — paste to replace'
+                               : 'github_pat_…';
+  $('elk').value = '';
+  $('elk').placeholder = localStorage.getItem('elkey')
+      ? 'ElevenLabs key saved — paste to replace' : 'sk_… (optional)';
+  show('setup');
+}
+
 /* --------------------------- lessons & reading --------------------------- */
 /* The curriculum lives in the sync repo (lessons.json, readings.json,
    pushed by the Mac). A lesson gates its batch's never-seen cards; marking
@@ -1338,6 +1577,13 @@ function openReading(id) {
   for (const line of (r.lines || [])) {
     const d = document.createElement('div');
     d.className = 'rline';
+    if (line.audio) {
+      const pl = document.createElement('span');
+      pl.className = 'rplay';
+      pl.textContent = '🔊';
+      pl.onclick = e => { e.stopPropagation(); playAudioName(line.audio); };
+      d.appendChild(pl);
+    }
     const ko = document.createElement('div');
     ko.className = 'ko';
     ko.textContent = line.ko;
@@ -1391,9 +1637,11 @@ async function enablePush() {
 
 /* -------------------------------- boot ----------------------------------- */
 async function saveToken() {
-  TOKEN = $('tok').value.trim();
+  TOKEN = $('tok').value.trim() || TOKEN;
   if (!TOKEN) return;
   localStorage.setItem('ghtok', TOKEN);
+  const elk = $('elk').value.trim();
+  if (elk) localStorage.setItem('elkey', elk);
   try { await boot(); }
   catch (e) { $('s-err').textContent = 'Could not load: ' + e.message; }
 }
